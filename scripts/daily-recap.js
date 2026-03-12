@@ -10,6 +10,10 @@ const DB_PATH = path.join(
   os.homedir(),
   "Library/Application Support/Wispr Flow/flow.sqlite"
 );
+const MONOLOGUE_PATH = path.join(
+  os.homedir(),
+  "Library/Containers/com.zeitalabs.jottleai/Data/Documents/transcription_history.json"
+);
 
 const args = process.argv.slice(2);
 const flagHTML = args.includes("--html");
@@ -46,19 +50,65 @@ const rows = db
   )
   .all(targetDate);
 
-if (rows.length === 0) {
-  console.log(`No Wispr Flow dictations found for ${targetDate}.`);
+// Normalize Wispr Flow rows
+const allRows = rows.map(r => ({
+  ...r,
+  source: "Wispr Flow",
+}));
+
+// Read Monologue data
+if (fs.existsSync(MONOLOGUE_PATH)) {
+  try {
+    const monologueData = JSON.parse(fs.readFileSync(MONOLOGUE_PATH, "utf-8"));
+    const CORE_DATA_EPOCH = 978307200;
+    for (const entry of monologueData.history || []) {
+      const ts = new Date((entry.timestamp + CORE_DATA_EPOCH) * 1000);
+      const dateStr = ts.toISOString().slice(0, 10);
+      if (dateStr !== targetDate) continue;
+      if (!entry.text || entry.text.trim() === "") continue;
+      const words = entry.text.split(/\s+/).filter(Boolean).length;
+      allRows.push({
+        transcriptEntityId: entry.id,
+        formattedText: entry.text,
+        asrText: entry.rawText,
+        timestamp: ts.toISOString().replace("T", " ").replace("Z", " +00:00"),
+        app: entry.sourceType === "app" ? entry.sourceIdentifier : (entry.sourceType === "url" ? "browser" : "Unknown"),
+        url: entry.sourceType === "url" ? entry.sourceIdentifier : null,
+        numWords: words,
+        duration: entry.duration || 0,
+        language: null,
+        conversationId: null,
+        source: "Monologue",
+      });
+    }
+  } catch (e) {
+    // Silently skip if Monologue data can't be read
+  }
+}
+
+// Sort combined rows by timestamp
+allRows.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+
+if (allRows.length === 0) {
+  console.log(`No dictations found for ${targetDate}.`);
   process.exit(0);
 }
 
 // --- Aggregate Stats ---
-const totalDictations = rows.length;
-const totalWords = rows.reduce((sum, r) => sum + (r.numWords || 0), 0);
-const totalDuration = rows.reduce((sum, r) => sum + (r.duration || 0), 0);
+const totalDictations = allRows.length;
+const totalWords = allRows.reduce((sum, r) => sum + (r.numWords || 0), 0);
+const totalDuration = allRows.reduce((sum, r) => sum + (r.duration || 0), 0);
+
+// Source breakdown
+const flowCount = allRows.filter(r => r.source === "Wispr Flow").length;
+const monoCount = allRows.filter(r => r.source === "Monologue").length;
+const flowWords = allRows.filter(r => r.source === "Wispr Flow").reduce((s, r) => s + (r.numWords || 0), 0);
+const monoWords = allRows.filter(r => r.source === "Monologue").reduce((s, r) => s + (r.numWords || 0), 0);
+const hasBothSources = flowCount > 0 && monoCount > 0;
 
 // App breakdown
 const appMap = {};
-for (const r of rows) {
+for (const r of allRows) {
   const bundleId = r.app || "Unknown";
   const appName = friendlyAppName(bundleId);
   if (!appMap[appName]) appMap[appName] = { count: 0, words: 0, bundleId };
@@ -69,7 +119,7 @@ const appsSorted = Object.entries(appMap).sort((a, b) => b[1].count - a[1].count
 
 // Hourly activity
 const hourMap = {};
-for (const r of rows) {
+for (const r of allRows) {
   const hour = new Date(r.timestamp).getHours();
   hourMap[hour] = (hourMap[hour] || 0) + 1;
 }
@@ -77,7 +127,7 @@ const peakHour = Object.entries(hourMap).sort((a, b) => b[1] - a[1])[0];
 
 // Group transcripts by conversation/app for topic extraction
 const transcriptsByApp = {};
-for (const r of rows) {
+for (const r of allRows) {
   const appName = friendlyAppName(r.app || "Unknown");
   if (!transcriptsByApp[appName]) transcriptsByApp[appName] = [];
   transcriptsByApp[appName].push(r.formattedText);
@@ -86,7 +136,7 @@ for (const r of rows) {
 // Timeline blocks (group by hour)
 const timelineBlocks = [];
 const hourGroups = {};
-for (const r of rows) {
+for (const r of allRows) {
   const hour = new Date(r.timestamp).getHours();
   if (!hourGroups[hour]) hourGroups[hour] = [];
   hourGroups[hour].push(r);
@@ -114,6 +164,11 @@ if (flagHTML) {
     peakHour,
     timelineBlocks,
     transcriptsByApp,
+    flowCount,
+    monoCount,
+    flowWords,
+    monoWords,
+    hasBothSources,
   });
   const outPath = path.join(os.homedir(), `Desktop/wispr-recap-${targetDate}.html`);
   fs.writeFileSync(outPath, html);
@@ -128,6 +183,11 @@ if (flagHTML) {
     peakHour,
     timelineBlocks,
     transcriptsByApp,
+    flowCount,
+    monoCount,
+    flowWords,
+    monoWords,
+    hasBothSources,
   });
 }
 
@@ -188,6 +248,7 @@ function friendlyAppName(bundleId) {
     "com.hnc.Discord": "Discord",
     "com.spotify.client": "Spotify",
     "us.zoom.xos": "Zoom",
+    "browser": "Browser",
   };
   if (map[bundleId]) return map[bundleId];
   // Try to extract last component
@@ -223,6 +284,11 @@ function printCLI(data) {
     peakHour,
     timelineBlocks,
     transcriptsByApp,
+    flowCount,
+    monoCount,
+    flowWords,
+    monoWords,
+    hasBothSources,
   } = data;
 
   const dayName = new Date(targetDate + "T12:00:00").toLocaleDateString("en-US", {
@@ -232,7 +298,7 @@ function printCLI(data) {
     year: "numeric",
   });
 
-  console.log(`\n# Wispr Flow Daily Recap — ${dayName}\n`);
+  console.log(`\n# Voice Dictation Recap — ${dayName}\n`);
 
   // Overview
   console.log("## Overview\n");
@@ -245,6 +311,16 @@ function printCLI(data) {
     `| Peak hour | ${peakHour ? `${formatHour(parseInt(peakHour[0]))} (${peakHour[1]} dictations)` : "N/A"} |`
   );
   console.log();
+
+  // Source breakdown
+  if (hasBothSources) {
+    console.log("## Source Breakdown\n");
+    console.log(`| Source | Dictations | Words |`);
+    console.log(`|--------|-----------|-------|`);
+    console.log(`| Wispr Flow | ${flowCount} | ${flowWords.toLocaleString()} |`);
+    console.log(`| Monologue | ${monoCount} | ${monoWords.toLocaleString()} |`);
+    console.log();
+  }
 
   // App breakdown
   console.log("## Apps Used\n");
@@ -302,6 +378,11 @@ function generateHTML(data) {
     peakHour,
     timelineBlocks,
     transcriptsByApp,
+    flowCount,
+    monoCount,
+    flowWords,
+    monoWords,
+    hasBothSources,
   } = data;
 
   const dayName = new Date(targetDate + "T12:00:00").toLocaleDateString("en-US", {
@@ -379,7 +460,7 @@ function generateHTML(data) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Wispr Flow Recap — ${escapeHTML(dayName)}</title>
+<title>Voice Dictation Recap — ${escapeHTML(dayName)}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -632,6 +713,22 @@ function generateHTML(data) {
     opacity: 0.5;
   }
 
+  /* Source Breakdown */
+  .source-breakdown {
+    display: flex; gap: 12px; margin: 20px auto; max-width: 720px;
+    justify-content: center; flex-wrap: wrap;
+  }
+  .source-pill {
+    font-family: var(--font-mono); font-size: 0.7rem; font-weight: 500;
+    letter-spacing: 0.06em; padding: 8px 16px;
+    border-radius: 999px; display: flex; align-items: center; gap: 8px;
+  }
+  .source-flow { background: rgba(243, 78, 63, 0.1); color: #f34e3f; }
+  .source-mono { background: rgba(63, 159, 143, 0.1); color: #3f9f8f; }
+  .source-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .flow-dot { background: #f34e3f; }
+  .mono-dot { background: #3f9f8f; }
+
   /* Share */
   .share-btn {
     font-family: var(--font-mono); font-size: 0.65rem; font-weight: 500;
@@ -755,7 +852,7 @@ function generateHTML(data) {
 <body>
   <div class="label-mono">Daily Recap</div>
   <h1>${escapeHTML(dayName)}</h1>
-  <div class="subtitle">Your voice, distilled — powered by Wispr Flow</div>
+  <div class="subtitle">Your voice, distilled — powered by Wispr Flow${hasBothSources ? " & Monologue" : (monoCount > 0 ? " & Monologue" : "")}</div>
 
   <div class="stats-grid">
     <div class="stat-card">
@@ -775,6 +872,11 @@ function generateHTML(data) {
       <div class="stat-label">Peak Hour</div>
     </div>
   </div>
+
+  ${hasBothSources ? `<div class="source-breakdown">
+    <div class="source-pill source-flow"><span class="source-dot flow-dot"></span> Wispr Flow — ${flowCount} dictations · ${flowWords.toLocaleString()} words</div>
+    <div class="source-pill source-mono"><span class="source-dot mono-dot"></span> Monologue — ${monoCount} dictations · ${monoWords.toLocaleString()} words</div>
+  </div>` : ""}
 
   <div class="section">
     <h2>Apps</h2>
@@ -833,7 +935,7 @@ function generateHTML(data) {
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script>
-  const shareText = "I spoke ${totalWords.toLocaleString()} words across ${appsSorted.length} apps today using @WisprFlow";
+  const shareText = "I spoke ${totalWords.toLocaleString()} words across ${appsSorted.length} apps today using ${hasBothSources ? "@WisprFlow & Monologue" : (monoCount > 0 ? "Monologue" : "@WisprFlow")}";
   let shareBlob = null;
 
   async function generateShareImage() {

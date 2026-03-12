@@ -1,6 +1,6 @@
 ---
 name: wispr-flow
-description: Generate daily, weekly, or monthly voice dictation recaps from Wispr Flow. Use when user says "what did I do today", "daily recap", "weekly recap", "monthly recap", "wispr recap", "show me my flow stats", "what apps did I use", "how much did I dictate", "what did I work on this week", or "what did I work on this month".
+description: Generate daily, weekly, or monthly voice dictation recaps from Wispr Flow and Monologue. Use when user says "what did I do today", "daily recap", "weekly recap", "monthly recap", "wispr recap", "monologue recap", "show me my flow stats", "what apps did I use", "how much did I dictate", "what did I work on this week", or "what did I work on this month".
 ---
 
 # Wispr Flow — Voice Recap
@@ -9,7 +9,7 @@ Use this skill when the user asks about their daily, weekly, or monthly activity
 
 ## What it does
 
-Reads the local Wispr Flow SQLite database (`~/Library/Application Support/Wispr Flow/flow.sqlite`) and generates activity recaps.
+Reads the local Wispr Flow SQLite database (`~/Library/Application Support/Wispr Flow/flow.sqlite`) and Monologue's transcription history (`~/Library/Containers/com.zeitalabs.jottleai/Data/Documents/transcription_history.json`), merges both sources, and generates activity recaps with source breakdown.
 
 ### Daily Recap
 - **Overview stats**: total dictations, words spoken, voice time, peak hour
@@ -100,4 +100,5 @@ HTML reports are styled to match the [founder.codes](https://founder.codes) desi
 ## Dependencies
 
 - `better-sqlite3` (already installed in `scripts/node_modules/`)
-- Requires Wispr Flow desktop app to be installed with local history enabled
+- Requires at least one of: Wispr Flow desktop app (with local history enabled) or Monologue desktop app
+- When both are installed, data is merged and stats show a source breakdown (Wispr Flow vs Monologue)
